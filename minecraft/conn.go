@@ -1475,6 +1475,13 @@ func (conn *Conn) handleRequestChunkRadius(pk *packet.RequestChunkRadius) error 
 	}
 	_ = conn.WritePacket(&packet.ChunkRadiusUpdated{ChunkRadius: radius})
 	conn.gameData.ChunkRadius = pk.ChunkRadius
+	if provider, ok := conn.proto.(PreSpawnPacketsProtocol); ok {
+		for _, preSpawn := range provider.PreSpawnPackets() {
+			if err := conn.WritePacket(preSpawn); err != nil {
+				return fmt.Errorf("send pre-spawn packet %T: %w", preSpawn, err)
+			}
+		}
+	}
 	_ = conn.WritePacket(&packet.PlayStatus{Status: packet.PlayStatusPlayerSpawn})
 	_ = conn.WritePacket(&packet.CreativeContent{})
 	return nil

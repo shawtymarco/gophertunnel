@@ -47,6 +47,13 @@ type LegacyNetworkSettingsProtocol interface {
 	LegacyNetworkSettings() packet.Compression
 }
 
+// PreSpawnPacketsProtocol is implemented by protocols that require additional
+// packets after ChunkRadiusUpdated and before PlayStatusPlayerSpawn. Packets
+// returned must use the current packet model and are converted by the Conn.
+type PreSpawnPacketsProtocol interface {
+	PreSpawnPackets() []packet.Packet
+}
+
 type ByteReader interface {
 	io.Reader
 	io.ByteReader
