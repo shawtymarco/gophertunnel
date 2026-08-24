@@ -438,6 +438,15 @@ func (listener *Listener) createConn(netConn net.Conn) {
 	conn.verifier = listener.verifier
 	conn.disconnectOnUnknownPacket = !listener.cfg.AllowUnknownPackets
 	conn.disconnectOnInvalidPacket = !listener.cfg.AllowInvalidPackets
+	conn.expect(packet.IDRequestNetworkSettings, packet.IDLogin)
+	if versioned, ok := netConn.(interface{ ProtocolVersion() byte }); ok && versioned.ProtocolVersion() <= 10 {
+		conn.legacyNetworkSettings = true
+		conn.compression = packet.FlateCompression
+		conn.encMu.Lock()
+		conn.enc.EnableLegacyCompression(conn.compression)
+		conn.encMu.Unlock()
+		conn.dec.EnableLegacyCompression(conn.compression, conn.maxDecompressedLen)
+	}
 
 	if listener.playerCount.Load() == int32(listener.cfg.MaximumPlayers) && listener.cfg.MaximumPlayers != 0 {
 		// The server was full. We kick the player immediately and close the connection.

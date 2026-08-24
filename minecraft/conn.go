@@ -88,16 +88,17 @@ type Conn struct {
 	log         *slog.Logger
 	authEnabled bool
 
-	proto                Protocol
-	acceptedProto        []Protocol
-	pool                 packet.Pool
-	enc                  *packet.Encoder
-	dec                  *packet.Decoder
-	compression          packet.Compression
-	compressionSelector  func(proto Protocol) packet.Compression
-	compressionThreshold int
-	maxDecompressedLen   int
-	readerLimits         bool
+	proto                 Protocol
+	acceptedProto         []Protocol
+	pool                  packet.Pool
+	enc                   *packet.Encoder
+	dec                   *packet.Decoder
+	compression           packet.Compression
+	compressionSelector   func(proto Protocol) packet.Compression
+	compressionThreshold  int
+	maxDecompressedLen    int
+	legacyNetworkSettings bool
+	readerLimits          bool
 
 	disconnectOnUnknownPacket bool
 	disconnectOnInvalidPacket bool
@@ -772,16 +773,7 @@ func (conn *Conn) handlePacket(pk packet.Packet) error {
 // handleRequestNetworkSettings handles an incoming RequestNetworkSettings packet. It returns an error if the protocol
 // version is not supported, otherwise sending back a NetworkSettings packet.
 func (conn *Conn) handleRequestNetworkSettings(pk *packet.RequestNetworkSettings) error {
-	found := false
-	for _, pro := range conn.acceptedProto {
-		if pro.ID() == pk.ClientProtocol {
-			conn.proto = pro
-			conn.pool = pro.Packets(true)
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !conn.selectProtocol(pk.ClientProtocol) {
 		status := packet.PlayStatusLoginFailedClient
 		if pk.ClientProtocol > protocol.CurrentProtocol {
 			// The server is outdated in this case, so we have to change the status we send.
@@ -829,6 +821,21 @@ func (conn *Conn) handleNetworkSettings(pk *packet.NetworkSettings) error {
 // handleLogin handles an incoming login packet. It verifies and decodes the login request found in the packet
 // and returns an error if it couldn't be done successfully.
 func (conn *Conn) handleLogin(pk *packet.Login) error {
+	if conn.legacyNetworkSettings {
+		if !conn.selectProtocol(pk.ClientProtocol) {
+			status := packet.PlayStatusLoginFailedClient
+			if pk.ClientProtocol > protocol.CurrentProtocol {
+				status = packet.PlayStatusLoginFailedServer
+			}
+			_ = conn.WritePacket(&packet.PlayStatus{Status: status})
+			return fmt.Errorf("incompatible legacy protocol version: expected %v, got %v", protocol.CurrentProtocol, pk.ClientProtocol)
+		}
+		conn.compression = packet.FlateCompression
+		conn.encMu.Lock()
+		conn.enc.EnableLegacyCompression(conn.compression)
+		conn.encMu.Unlock()
+		conn.dec.EnableLegacyCompression(conn.compression, conn.maxDecompressedLen)
+	}
 	var (
 		err        error
 		authResult login.AuthResult
@@ -865,6 +872,17 @@ func (conn *Conn) handleLogin(pk *packet.Login) error {
 		return fmt.Errorf("enable encryption: %w", err)
 	}
 	return nil
+}
+
+func (conn *Conn) selectProtocol(protocolID int32) bool {
+	for _, candidate := range conn.acceptedProto {
+		if candidate.ID() == protocolID {
+			conn.proto = candidate
+			conn.pool = candidate.Packets(true)
+			return true
+		}
+	}
+	return false
 }
 
 // publicKeyConn is implemented by underlying [net.Conn] of the Conn to provide access
@@ -1457,6 +1475,13 @@ func (conn *Conn) handleRequestChunkRadius(pk *packet.RequestChunkRadius) error 
 	}
 	_ = conn.WritePacket(&packet.ChunkRadiusUpdated{ChunkRadius: radius})
 	conn.gameData.ChunkRadius = pk.ChunkRadius
+	if provider, ok := conn.proto.(PreSpawnPacketsProtocol); ok {
+		for _, preSpawn := range provider.PreSpawnPackets() {
+			if err := conn.WritePacket(preSpawn); err != nil {
+				return fmt.Errorf("send pre-spawn packet %T: %w", preSpawn, err)
+			}
+		}
+	}
 	_ = conn.WritePacket(&packet.PlayStatus{Status: packet.PlayStatusPlayerSpawn})
 	_ = conn.WritePacket(&packet.CreativeContent{})
 	return nil

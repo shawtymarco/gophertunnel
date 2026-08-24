@@ -23,6 +23,7 @@ type Encoder struct {
 	header               []byte
 	compressionThreshold int
 	compression          Compression
+	legacyCompression    bool
 	encrypt              *encrypt
 	// disableEncryption indicates whether to prevent encryption from being enabled
 	// even if it is requested on handshake during login.
@@ -65,6 +66,16 @@ func (encoder *Encoder) EnableEncryption(keyBytes [32]byte) {
 func (encoder *Encoder) EnableCompression(compression Compression, threshold int) {
 	encoder.compression = compression
 	encoder.compressionThreshold = threshold
+	encoder.legacyCompression = false
+}
+
+// EnableLegacyCompression enables the pre-NetworkSettings batch format used
+// by RakNet v10 clients. Every batch is compressed and no algorithm byte is
+// prefixed after the batch header.
+func (encoder *Encoder) EnableLegacyCompression(compression Compression) {
+	encoder.compression = compression
+	encoder.compressionThreshold = 0
+	encoder.legacyCompression = true
 }
 
 // Encode encodes the packets passed. It writes all of them as a single packet which is  compressed and
@@ -84,7 +95,7 @@ func (encoder *Encoder) Encode(packets [][]byte) error {
 
 	compression := encoder.compression
 	_, _ = buf.Write(encoder.header)
-	if compression != nil {
+	if compression != nil && !encoder.legacyCompression {
 		_ = buf.WriteByte(0)
 	}
 	batchStart := buf.Len()
@@ -103,7 +114,24 @@ func (encoder *Encoder) Encode(packets [][]byte) error {
 	data := buf.Bytes()
 	if compression != nil {
 		batch := data[batchStart:]
-		if len(batch) < encoder.compressionThreshold {
+		if encoder.legacyCompression {
+			compressedBuf = internal.BufferPool.Get().(*bytes.Buffer)
+			_, _ = compressedBuf.Write(encoder.header)
+			var err error
+			if appender, ok := compression.(appendCompression); ok {
+				if n := appender.MaxCompressedLen(len(batch)); n > 0 {
+					compressedBuf.Grow(n)
+				}
+				data, err = appender.CompressAppend(compressedBuf.Bytes(), batch)
+			} else {
+				compressed, compressErr := compression.Compress(batch)
+				err = compressErr
+				data = append(compressedBuf.Bytes(), compressed...)
+			}
+			if err != nil {
+				return fmt.Errorf("compress legacy batch: %w", err)
+			}
+		} else if len(batch) < encoder.compressionThreshold {
 			data[len(encoder.header)] = byte(NopCompression.EncodeCompression())
 		} else {
 			compressedBuf = internal.BufferPool.Get().(*bytes.Buffer)
