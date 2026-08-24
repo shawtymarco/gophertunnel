@@ -40,6 +40,13 @@ type Protocol interface {
 	ConvertFromLatest(pk packet.Packet, conn *Conn) []packet.Packet
 }
 
+// LegacyNetworkSettingsProtocol is implemented by protocols that predate the
+// RequestNetworkSettings exchange. Their first Minecraft packet is Login and
+// compression is active immediately using the returned legacy batch codec.
+type LegacyNetworkSettingsProtocol interface {
+	LegacyNetworkSettings() packet.Compression
+}
+
 type ByteReader interface {
 	io.Reader
 	io.ByteReader

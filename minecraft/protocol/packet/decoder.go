@@ -27,6 +27,7 @@ type Decoder struct {
 
 	decompress         bool
 	compression        Compression
+	legacyCompression  bool
 	maxDecompressedLen int
 	encrypt            *encrypt
 	// disableEncryption indicates whether to prevent encryption from being enabled
@@ -82,6 +83,16 @@ func (decoder *Decoder) EnableEncryption(keyBytes [32]byte) {
 func (decoder *Decoder) EnableCompression(compression Compression, maxDecompressedLen int) {
 	decoder.decompress = true
 	decoder.compression = compression
+	decoder.legacyCompression = false
+	decoder.maxDecompressedLen = maxDecompressedLen
+}
+
+// EnableLegacyCompression enables the pre-NetworkSettings batch format used
+// by RakNet v10 clients. Batches contain no compression algorithm byte.
+func (decoder *Decoder) EnableLegacyCompression(compression Compression, maxDecompressedLen int) {
+	decoder.decompress = true
+	decoder.compression = compression
+	decoder.legacyCompression = true
 	decoder.maxDecompressedLen = maxDecompressedLen
 }
 
@@ -133,22 +144,29 @@ func (decoder *Decoder) Decode() (packets [][]byte, err error) {
 	}
 
 	if decoder.decompress {
-		if len(data) == 0 {
-			return nil, fmt.Errorf("decompress batch: missing compression algorithm")
-		}
-		if data[0] == 0xff {
-			data = data[1:]
-		} else {
-			compression, ok := CompressionByID(uint16(data[0]))
-			if !ok {
-				return nil, fmt.Errorf("decompress batch: unknown compression algorithm %v", data[0])
-			}
-			if compression != decoder.compression {
-				return nil, fmt.Errorf("decompress batch: unexpected compression algorithm: got %v, expected %v", compression, decoder.compression)
-			}
-			data, err = compression.Decompress(data[1:], decoder.maxDecompressedLen)
+		if decoder.legacyCompression {
+			data, err = decoder.compression.Decompress(data, decoder.maxDecompressedLen)
 			if err != nil {
-				return nil, fmt.Errorf("decompress batch: %w", err)
+				return nil, fmt.Errorf("decompress legacy batch: %w", err)
+			}
+		} else {
+			if len(data) == 0 {
+				return nil, fmt.Errorf("decompress batch: missing compression algorithm")
+			}
+			if data[0] == 0xff {
+				data = data[1:]
+			} else {
+				compression, ok := CompressionByID(uint16(data[0]))
+				if !ok {
+					return nil, fmt.Errorf("decompress batch: unknown compression algorithm %v", data[0])
+				}
+				if compression != decoder.compression {
+					return nil, fmt.Errorf("decompress batch: unexpected compression algorithm: got %v, expected %v", compression, decoder.compression)
+				}
+				data, err = compression.Decompress(data[1:], decoder.maxDecompressedLen)
+				if err != nil {
+					return nil, fmt.Errorf("decompress batch: %w", err)
+				}
 			}
 		}
 	}

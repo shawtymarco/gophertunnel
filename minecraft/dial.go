@@ -324,9 +324,38 @@ func (d Dialer) DialContextNetwork(ctx context.Context, network Network, address
 		conn.identityData = identityData
 	}
 
+	legacyCompression, loginFirst := packet.Compression(nil), false
+	if legacy, ok := d.Protocol.(LegacyNetworkSettingsProtocol); ok {
+		legacyCompression = legacy.LegacyNetworkSettings()
+		loginFirst = legacyCompression != nil
+	}
+	if loginFirst {
+		conn.legacyNetworkSettings = true
+		conn.compression = legacyCompression
+		conn.encMu.Lock()
+		conn.enc.EnableLegacyCompression(legacyCompression)
+		conn.encMu.Unlock()
+		conn.dec.EnableLegacyCompression(legacyCompression, conn.maxDecompressedLen)
+	}
+
 	readyForLogin, connected := make(chan struct{}), make(chan struct{})
 	ctx, cancel := context.WithCancelCause(ctx)
 	go listenConn(conn, readyForLogin, connected, cancel)
+	if loginFirst {
+		conn.expect(packet.IDServerToClientHandshake, packet.IDPlayStatus)
+		if err := conn.WritePacket(&packet.Login{ConnectionRequest: request, ClientProtocol: d.Protocol.ID()}); err != nil {
+			return nil, conn.wrap(fmt.Errorf("send legacy login: %w", err), "dial")
+		}
+		_ = conn.Flush()
+		select {
+		case <-ctx.Done():
+			return nil, conn.wrap(context.Cause(ctx), "dial")
+		case <-conn.ctx.Done():
+			return nil, conn.closeErr("dial")
+		case <-connected:
+			return conn, nil
+		}
+	}
 
 	conn.expect(packet.IDNetworkSettings, packet.IDPlayStatus)
 	if err := conn.WritePacket(&packet.RequestNetworkSettings{ClientProtocol: d.Protocol.ID()}); err != nil {
