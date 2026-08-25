@@ -171,10 +171,29 @@ func Parse(request []byte, verifier *oidc.IDTokenVerifier) (IdentityData, Client
 		ind := strings.LastIndex(cData.ServerAddress, ":")
 		cData.ServerAddress = "[" + cData.ServerAddress[:ind] + "]" + cData.ServerAddress[ind:]
 	}
+	normaliseSkinResourcePatch(&cData)
 	if err := cData.Validate(); err != nil {
 		return iData, cData, res, fmt.Errorf("validate client data: %w", err)
 	}
 	return iData, cData, AuthResult{PublicKey: key, XBOXLiveAuthenticated: authenticated}, nil
+}
+
+var defaultSkinResourcePatch = base64.StdEncoding.EncodeToString([]byte(`{"geometry":{"default":"geometry.humanoid.custom"}}`))
+
+// normaliseSkinResourcePatch replaces a syntactically invalid resource patch
+// with the vanilla custom-geometry fallback. Some third-party clients send a
+// valid base64 value containing truncated JSON. The patch is cosmetic and
+// untrusted, so canonicalising it prevents downstream skin decoders from
+// receiving malformed JSON without relaxing invalid-base64 validation.
+func normaliseSkinResourcePatch(data *ClientData) {
+	decoded, err := base64.StdEncoding.DecodeString(data.SkinResourcePatch)
+	if err != nil {
+		return
+	}
+	var patch map[string]any
+	if json.Unmarshal(decoded, &patch) != nil {
+		data.SkinResourcePatch = defaultSkinResourcePatch
+	}
 }
 
 // parseLegacyChain verifies the legacy Mojang chain and returns IdentityData from extraData,
