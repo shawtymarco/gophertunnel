@@ -6,7 +6,6 @@ const (
 	PackSettingTypeFloat = iota
 	PackSettingTypeBool
 	PackSettingTypeString
-	PackSettingTypeStringList
 )
 
 // TexturePackInfo represents a texture pack's info sent over network. It holds information about the
@@ -99,6 +98,6 @@ func (x *PackURL) Marshal(r IO) {
 type PackSetting struct {
 	// Name is the name of the pack setting.
 	Name string
-	// Value is the new value of the setting. This is either a float32, bool, string or []string.
+	// Value is the new value of the setting. This is either a float32, bool or string.
 	Value any
 }

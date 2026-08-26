@@ -30,8 +30,6 @@ type MoveActorDelta struct {
 	// ForceCompletion specifies whether the client should complete any in-progress local movement before applying the
 	// update.
 	ForceCompletion bool
-	// Ticks is the number of ticks over which the movement should be interpolated by the client.
-	Ticks uint64
 }
 
 // ID ...
@@ -51,5 +49,4 @@ func (pk *MoveActorDelta) Marshal(io protocol.IO) {
 	io.Bool(&pk.ForceMove)
 	io.Bool(&pk.ForceMoveLocalEntity)
 	io.Bool(&pk.ForceCompletion)
-	io.Varuint64(&pk.Ticks)
 }

@@ -29,12 +29,6 @@ const (
 	MapDecorationTypeVillageTaiga
 	MapDecorationTypeJungleTemple
 	MapDecorationTypeWitchHut
-	MapDecorationTypeTrialChambers
-	MapDecorationTypeAbandonedCamp
-	MapDecorationTypeBuriedAncientCity
-	MapDecorationTypeBuriedMineshaft
-	MapDecorationTypeDesertPyramid
-	MapDecorationTypeWarmOceanRuins
 )
 
 const (
