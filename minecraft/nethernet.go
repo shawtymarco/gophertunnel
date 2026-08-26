@@ -50,7 +50,6 @@ func (n NetherNet) DialContextIdentity(ctx context.Context, address string, toke
 		n.Dialer.Identity = &nethernet.Identity{
 			PrivateKey: privateKey,
 			Token:      token,
-			Domain:     "self",
 		}
 	}
 	return n.DialContext(ctx, address)
