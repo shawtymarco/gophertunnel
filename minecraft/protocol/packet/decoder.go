@@ -2,8 +2,6 @@ package packet
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
 	"fmt"
 	"io"
 
@@ -29,7 +27,7 @@ type Decoder struct {
 	compression        Compression
 	legacyCompression  bool
 	maxDecompressedLen int
-	encrypt            *encrypt
+	encrypt            Encryption
 	// disableEncryption indicates whether to prevent encryption from being enabled
 	// even if it is requested on handshake during login.
 	disableEncryption bool
@@ -73,10 +71,15 @@ func (decoder *Decoder) EnableEncryption(keyBytes [32]byte) {
 	if decoder.disableEncryption {
 		return
 	}
-	block, _ := aes.NewCipher(keyBytes[:])
-	first12 := append([]byte(nil), keyBytes[:12]...)
-	stream := cipher.NewCTR(block, append(first12, 0, 0, 0, 2))
-	decoder.encrypt = newEncrypt(keyBytes[:], stream)
+	decoder.encrypt = NewCTREncryption(keyBytes)
+}
+
+// EnableEncryptionWith enables decryption using a protocol-specific encryption implementation.
+func (decoder *Decoder) EnableEncryptionWith(encryption Encryption) {
+	if decoder.disableEncryption {
+		return
+	}
+	decoder.encrypt = encryption
 }
 
 // EnableCompression enables compression for the Decoder.
@@ -135,8 +138,8 @@ func (decoder *Decoder) Decode() (packets [][]byte, err error) {
 	data = data[len(decoder.header):]
 
 	if decoder.encrypt != nil {
-		decoder.encrypt.decrypt(data)
-		if err := decoder.encrypt.verify(data); err != nil {
+		decoder.encrypt.Decrypt(data)
+		if err := decoder.encrypt.Verify(data); err != nil {
 			// The packet did not have a correct checksum.
 			return nil, fmt.Errorf("verify batch: %w", err)
 		}

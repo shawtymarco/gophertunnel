@@ -2,8 +2,6 @@ package packet
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
 	"fmt"
 	"io"
 	"slices"
@@ -24,7 +22,7 @@ type Encoder struct {
 	compressionThreshold int
 	compression          Compression
 	legacyCompression    bool
-	encrypt              *encrypt
+	encrypt              Encryption
 	// disableEncryption indicates whether to prevent encryption from being enabled
 	// even if it is requested on handshake during login.
 	disableEncryption bool
@@ -56,10 +54,15 @@ func (encoder *Encoder) EnableEncryption(keyBytes [32]byte) {
 	if encoder.disableEncryption {
 		return
 	}
-	block, _ := aes.NewCipher(keyBytes[:])
-	first12 := append([]byte(nil), keyBytes[:12]...)
-	stream := cipher.NewCTR(block, append(first12, 0, 0, 0, 2))
-	encoder.encrypt = newEncrypt(keyBytes[:], stream)
+	encoder.encrypt = NewCTREncryption(keyBytes)
+}
+
+// EnableEncryptionWith enables encryption using a protocol-specific encryption implementation.
+func (encoder *Encoder) EnableEncryptionWith(encryption Encryption) {
+	if encoder.disableEncryption {
+		return
+	}
+	encoder.encrypt = encryption
 }
 
 // EnableCompression enables compression for the Encoder.
@@ -160,7 +163,7 @@ func (encoder *Encoder) Encode(packets [][]byte) error {
 		// If the encryption session is not nil, encryption is enabled, meaning we should encrypt the
 		// compressed data of this packet.
 		data = slices.Grow(data, 8)
-		data = encoder.encrypt.encrypt(data)
+		data = encoder.encrypt.Encrypt(data)
 	}
 	if _, err := encoder.w.Write(data); err != nil {
 		return fmt.Errorf("write batch: %w", err)

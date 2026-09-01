@@ -966,10 +966,7 @@ func (conn *Conn) handleServerToClientHandshake(pk *packet.ServerToClientHandsha
 	}
 
 	// Finally we enable encryption for the enc and dec using the secret pubKey bytes we produced.
-	conn.encMu.Lock()
-	conn.enc.EnableEncryption(keyBytes)
-	conn.encMu.Unlock()
-	conn.dec.EnableEncryption(keyBytes)
+	conn.enablePacketEncryption(keyBytes)
 
 	// We write a ClientToServerHandshake packet (which has no payload) as a response.
 	_ = conn.WritePacket(&packet.ClientToServerHandshake{})
@@ -1598,12 +1595,21 @@ func (conn *Conn) enableEncryption(clientPublicKey *ecdsa.PublicKey) error {
 	}
 
 	// Finally we enable encryption for the encoder and decoder using the secret key bytes we produced.
-	conn.encMu.Lock()
-	conn.enc.EnableEncryption(keyBytes)
-	conn.encMu.Unlock()
-	conn.dec.EnableEncryption(keyBytes)
+	conn.enablePacketEncryption(keyBytes)
 
 	return nil
+}
+
+func (conn *Conn) enablePacketEncryption(keyBytes [32]byte) {
+	conn.encMu.Lock()
+	defer conn.encMu.Unlock()
+	if protocolEncryption, ok := conn.proto.(EncryptionProtocol); ok {
+		conn.enc.EnableEncryptionWith(protocolEncryption.Encryption(keyBytes))
+		conn.dec.EnableEncryptionWith(protocolEncryption.Encryption(keyBytes))
+		return
+	}
+	conn.enc.EnableEncryption(keyBytes)
+	conn.dec.EnableEncryption(keyBytes)
 }
 
 // encryptionKey computes the encryption key for the connection using the salt and the

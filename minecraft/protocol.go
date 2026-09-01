@@ -47,6 +47,12 @@ type LegacyNetworkSettingsProtocol interface {
 	LegacyNetworkSettings() packet.Compression
 }
 
+// EncryptionProtocol is implemented by protocols that use an encryption mode other than the current CTR mode.
+// Encryption is called independently for the encoder and decoder because each direction owns a separate counter.
+type EncryptionProtocol interface {
+	Encryption(key [32]byte) packet.Encryption
+}
+
 // PreSpawnPacketsProtocol is implemented by protocols that require additional
 // packets after ChunkRadiusUpdated and before PlayStatusPlayerSpawn. Packets
 // returned must use the current packet model and are converted by the Conn.
