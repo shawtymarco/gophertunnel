@@ -88,6 +88,9 @@ type ListenConfig struct {
 	// will not be flushed automatically. In this case, calling `(*Conn).Flush()` is required after any
 	// calls to `(*Conn).Write()` or `(*Conn).WritePacket()` to send the packets over network.
 	FlushRate time.Duration
+	// MaximumMTU caps the largest MTU negotiated by a supporting network. The zero value keeps the
+	// network implementation's default. RakNet supports this option through [MTUNetwork].
+	MaximumMTU uint16
 
 	// ResourcePacks is a slice of resource packs that the listener may hold. Each client will be asked to
 	// download these resource packs upon joining.
@@ -198,6 +201,11 @@ func (cfg ListenConfig) ListenNetwork(network Network, address string) (*Listene
 	} else if cfg.MaxDecompressedLen < 0 {
 		cfg.MaxDecompressedLen = math.MaxInt
 	}
+	var err error
+	network, err = cfg.withMaximumMTU(network)
+	if err != nil {
+		return nil, err
+	}
 
 	var verifier *oidc.IDTokenVerifier
 	if !cfg.AuthenticationDisabled {
@@ -233,6 +241,17 @@ func (cfg ListenConfig) ListenNetwork(network Network, address string) (*Listene
 	// Actually start listening.
 	go listener.listen()
 	return listener, nil
+}
+
+func (cfg ListenConfig) withMaximumMTU(network Network) (Network, error) {
+	if cfg.MaximumMTU == 0 {
+		return network, nil
+	}
+	mtuNetwork, ok := network.(MTUNetwork)
+	if !ok {
+		return nil, fmt.Errorf("listen: network %T does not support a configurable maximum MTU", network)
+	}
+	return mtuNetwork.WithMaximumMTU(cfg.MaximumMTU), nil
 }
 
 // Listen announces on the local network address. The network must be "tcp", "tcp4", "tcp6", "unix",

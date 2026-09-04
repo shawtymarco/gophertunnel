@@ -20,13 +20,33 @@ const (
 
 // RakNet is the native RakNet network. Its listener also accepts the wire-
 // compatible v10 handshake while keeping the current upstream implementation.
-type RakNet struct{ l *slog.Logger }
+type RakNet struct {
+	l          *slog.Logger
+	maximumMTU uint16
+}
 
 // RakNetV10 is a development dialer network that emits a v10 handshake.
-type RakNetV10 struct{ l *slog.Logger }
+type RakNetV10 struct {
+	l          *slog.Logger
+	maximumMTU uint16
+}
+
+// WithMaximumMTU returns a copy of r that caps the largest RakNet MTU negotiated. A zero maximum keeps
+// go-raknet's default.
+func (r RakNet) WithMaximumMTU(maximumMTU uint16) Network {
+	r.maximumMTU = maximumMTU
+	return r
+}
+
+// WithMaximumMTU returns a copy of r that caps the largest RakNet MTU negotiated. A zero maximum keeps
+// go-raknet's default.
+func (r RakNetV10) WithMaximumMTU(maximumMTU uint16) Network {
+	r.maximumMTU = maximumMTU
+	return r
+}
 
 func (r RakNet) DialContext(ctx context.Context, address string) (net.Conn, error) {
-	return raknet.Dialer{ErrorLog: r.l.With("net origin", "raknet")}.DialContext(ctx, address)
+	return raknet.Dialer{ErrorLog: r.l.With("net origin", "raknet"), MaxMTU: r.maximumMTU}.DialContext(ctx, address)
 }
 
 func (r RakNet) PingContext(ctx context.Context, address string) ([]byte, error) {
@@ -34,13 +54,14 @@ func (r RakNet) PingContext(ctx context.Context, address string) ([]byte, error)
 }
 
 func (r RakNet) Listen(address string) (NetworkListener, error) {
-	return listenMultiVersionRakNet(address, r.l.With("net origin", "raknet"))
+	return listenMultiVersionRakNet(address, r.l.With("net origin", "raknet"), r.maximumMTU)
 }
 
 func (r RakNetV10) DialContext(ctx context.Context, address string) (net.Conn, error) {
 	return raknet.Dialer{
 		ErrorLog:       r.l.With("net origin", "raknet-v10"),
 		UpstreamDialer: rakNetV10UpstreamDialer{logger: r.l.With("net origin", "raknet-v10")},
+		MaxMTU:         r.maximumMTU,
 	}.DialContext(ctx, address)
 }
 
@@ -49,14 +70,15 @@ func (r RakNetV10) PingContext(ctx context.Context, address string) ([]byte, err
 }
 
 func (r RakNetV10) Listen(address string) (NetworkListener, error) {
-	return listenMultiVersionRakNet(address, r.l.With("net origin", "raknet-v10"))
+	return listenMultiVersionRakNet(address, r.l.With("net origin", "raknet-v10"), r.maximumMTU)
 }
 
-func listenMultiVersionRakNet(address string, logger *slog.Logger) (NetworkListener, error) {
+func listenMultiVersionRakNet(address string, logger *slog.Logger, maximumMTU uint16) (NetworkListener, error) {
 	tracker := newRakNetVersionTracker()
 	listener, err := (raknet.ListenConfig{
 		ErrorLog:               logger,
 		UpstreamPacketListener: rakNetPacketListener{tracker: tracker, logger: logger},
+		MaxMTU:                 maximumMTU,
 	}).Listen(address)
 	if err != nil {
 		return nil, err

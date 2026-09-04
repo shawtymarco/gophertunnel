@@ -31,6 +31,14 @@ type Network interface {
 	Listen(address string) (NetworkListener, error)
 }
 
+// MTUNetwork is a Network that may derive a copy with the maximum MTU passed.
+// Implementations should preserve their zero-value MTU behaviour when maxMTU is
+// zero.
+type MTUNetwork interface {
+	Network
+	WithMaximumMTU(maxMTU uint16) Network
+}
+
 // identityDialer is implemented by Networks that require an additional security measure
 // to prove possession of the player's private key. The identity token is issued by Minecraft's
 // authorization service and must include corresponding public key in the 'cpk' claim.
