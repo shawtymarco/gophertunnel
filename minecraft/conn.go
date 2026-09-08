@@ -106,6 +106,10 @@ type Conn struct {
 	identityData login.IdentityData
 	clientData   login.ClientData
 
+	// gameDataMu protects gameData's scalars and reference headers. Registry
+	// slices/maps are immutable once supplied: Connection handlers only replace
+	// them. Never hold this lock across packet conversion, callbacks or I/O.
+	gameDataMu       sync.RWMutex
 	gameData         GameData
 	gameDataReceived atomic.Bool
 
@@ -277,8 +281,13 @@ func (conn *Conn) Authenticated() bool {
 // GameData returns specific game data set to the connection for the player to be initialised with. If the
 // Conn is obtained using Listen, this game data may be set to the Listener. If obtained using Dial, the data
 // is obtained from the server.
+// The returned value is a snapshot. Its slices/maps and their nested contents are shared read-only registry
+// data: Callers must clone these before modifying them.
 func (conn *Conn) GameData() GameData {
-	return conn.gameData
+	conn.gameDataMu.RLock()
+	data := conn.gameData
+	conn.gameDataMu.RUnlock()
+	return data
 }
 
 // Proto returns the protocol of the connection.
@@ -311,15 +320,18 @@ func (conn *Conn) StartGameTimeout(data GameData, timeout time.Duration) error {
 // StartGameContext should be called for a Conn obtained using a minecraft.Listener. The game data passed will
 // be used to spawn the player in the world of the server. To spawn a Conn obtained from a call to
 // minecraft.Dial(), use Conn.DoSpawn().
+// Slices/maps and their nested contents in data must not be modified after being supplied.
 func (conn *Conn) StartGameContext(ctx context.Context, data GameData) error {
 	if conn.gameDataReceived.Load() {
 		panic("(*Conn).StartGame must only be called on Listener connections")
 	}
+	conn.gameDataMu.Lock()
 	if data.WorldName == "" {
 		data.WorldName = conn.gameData.WorldName
 	}
 
 	conn.gameData = data
+	conn.gameDataMu.Unlock()
 	for _, item := range data.Items {
 		if item.Name == "minecraft:shield" {
 			conn.shieldID.Store(int32(item.RuntimeID))
@@ -620,7 +632,10 @@ func (conn *Conn) ClientCacheEnabled() bool {
 // Listener, this is the radius that the client requested. For connections obtained through a Dialer, this
 // is the radius that the server approved upon.
 func (conn *Conn) ChunkRadius() int {
-	return int(conn.gameData.ChunkRadius)
+	conn.gameDataMu.RLock()
+	radius := conn.gameData.ChunkRadius
+	conn.gameDataMu.RUnlock()
+	return int(radius)
 }
 
 // Context returns the connection's context. The context is canceled when the connection is closed,
@@ -1152,7 +1167,7 @@ func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClient
 
 // startGame sends a StartGame packet using the game data of the connection.
 func (conn *Conn) startGame() {
-	data := conn.gameData
+	data := conn.GameData()
 	if len(data.Dimensions) > 0 {
 		_ = conn.WritePacket(&packet.DimensionData{Definitions: data.Dimensions})
 	}
@@ -1395,13 +1410,16 @@ func waitResourcePackChunkSendDelay(ctx context.Context, delay time.Duration) er
 }
 
 func (conn *Conn) handleDimensionData(pk *packet.DimensionData) error {
+	conn.gameDataMu.Lock()
 	conn.gameData.Dimensions = pk.Definitions
+	conn.gameDataMu.Unlock()
 	return nil
 }
 
 // handleStartGame handles an incoming StartGame packet. It is the signal that the player has been added to a
 // world, and it obtains most of its dedicated properties.
 func (conn *Conn) handleStartGame(pk *packet.StartGame) error {
+	conn.gameDataMu.Lock()
 	conn.gameData = GameData{
 		Difficulty:                   pk.Difficulty,
 		WorldName:                    pk.WorldName,
@@ -1440,6 +1458,7 @@ func (conn *Conn) handleStartGame(pk *packet.StartGame) error {
 		PropertyData:                 pk.PropertyData,
 		Dimensions:                   conn.gameData.Dimensions,
 	}
+	conn.gameDataMu.Unlock()
 	conn.expect(packet.IDItemRegistry)
 	return nil
 }
@@ -1447,7 +1466,9 @@ func (conn *Conn) handleStartGame(pk *packet.StartGame) error {
 // handleItemRegistry handles an incoming ItemRegistry packet. It contains the item definitions that the client
 // should use, including the shield ID which is necessary for reading and writing items in the future.
 func (conn *Conn) handleItemRegistry(pk *packet.ItemRegistry) error {
+	conn.gameDataMu.Lock()
 	conn.gameData.Items = pk.Items
+	conn.gameDataMu.Unlock()
 	for _, item := range pk.Items {
 		if item.Name == "minecraft:shield" {
 			conn.shieldID.Store(int32(item.RuntimeID))
@@ -1467,11 +1488,13 @@ func (conn *Conn) handleRequestChunkRadius(pk *packet.RequestChunkRadius) error 
 	}
 	conn.expect(packet.IDSetLocalPlayerAsInitialised)
 	radius := pk.ChunkRadius
-	if r := conn.gameData.ChunkRadius; r != 0 {
+	if r := int32(conn.ChunkRadius()); r != 0 {
 		radius = r
 	}
 	_ = conn.WritePacket(&packet.ChunkRadiusUpdated{ChunkRadius: radius})
+	conn.gameDataMu.Lock()
 	conn.gameData.ChunkRadius = pk.ChunkRadius
+	conn.gameDataMu.Unlock()
 	if provider, ok := conn.proto.(PreSpawnPacketsProtocol); ok {
 		for _, preSpawn := range provider.PreSpawnPackets() {
 			if err := conn.WritePacket(preSpawn); err != nil {
@@ -1492,7 +1515,9 @@ func (conn *Conn) handleChunkRadiusUpdated(pk *packet.ChunkRadiusUpdated) error 
 	}
 	conn.expect(packet.IDPlayStatus)
 
+	conn.gameDataMu.Lock()
 	conn.gameData.ChunkRadius = pk.ChunkRadius
+	conn.gameDataMu.Unlock()
 	conn.gameDataReceived.Store(true)
 
 	conn.tryFinaliseClientConn()
@@ -1503,8 +1528,9 @@ func (conn *Conn) handleChunkRadiusUpdated(pk *packet.ChunkRadiusUpdated) error 
 // packet in the spawning sequence and it marks the point where a server sided connection is considered
 // logged in.
 func (conn *Conn) handleSetLocalPlayerAsInitialised(pk *packet.SetLocalPlayerAsInitialised) error {
-	if pk.EntityRuntimeID != conn.gameData.EntityRuntimeID {
-		return fmt.Errorf("entity runtime ID mismatch: expected %v (from StartGame), got %v", conn.gameData.EntityRuntimeID, pk.EntityRuntimeID)
+	data := conn.GameData()
+	if pk.EntityRuntimeID != data.EntityRuntimeID {
+		return fmt.Errorf("entity runtime ID mismatch: expected %v (from StartGame), got %v", data.EntityRuntimeID, pk.EntityRuntimeID)
 	}
 	if conn.waitingForSpawn.CompareAndSwap(true, false) {
 		close(conn.spawn)
@@ -1567,7 +1593,7 @@ func (conn *Conn) tryFinaliseClientConn() {
 
 		close(conn.spawn)
 		conn.loggedIn = true
-		_ = conn.WritePacket(&packet.SetLocalPlayerAsInitialised{EntityRuntimeID: conn.gameData.EntityRuntimeID})
+		_ = conn.WritePacket(&packet.SetLocalPlayerAsInitialised{EntityRuntimeID: conn.GameData().EntityRuntimeID})
 	}
 }
 

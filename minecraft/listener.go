@@ -452,7 +452,10 @@ func (listener *Listener) createConn(netConn net.Conn) {
 	conn.resourcePacks = packs
 	conn.fetchResourcePacks = listener.cfg.FetchResourcePacks
 	conn.resourcePackDelivery = listener.cfg.ResourcePackDelivery.normalized()
-	conn.gameData.WorldName = listener.status().ServerName
+	worldName := listener.status().ServerName
+	conn.gameDataMu.Lock()
+	conn.gameData.WorldName = worldName
+	conn.gameDataMu.Unlock()
 	conn.authEnabled = !listener.cfg.AuthenticationDisabled
 	conn.verifier = listener.verifier
 	conn.disconnectOnUnknownPacket = !listener.cfg.AllowUnknownPackets
