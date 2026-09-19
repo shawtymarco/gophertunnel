@@ -1167,6 +1167,9 @@ func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClient
 
 // startGame sends a StartGame packet using the game data of the connection.
 func (conn *Conn) startGame() {
+	// A fast peer may reply before Flush returns. Publish the receive state
+	// before any StartGame data can reach it, so replies stay connection-owned.
+	conn.expect(packet.IDRequestChunkRadius, packet.IDSetLocalPlayerAsInitialised)
 	data := conn.GameData()
 	if len(data.Dimensions) > 0 {
 		_ = conn.WritePacket(&packet.DimensionData{Definitions: data.Dimensions})
@@ -1226,7 +1229,6 @@ func (conn *Conn) startGame() {
 	})
 	_ = conn.WritePacket(&packet.ItemRegistry{Items: data.Items})
 	_ = conn.Flush()
-	conn.expect(packet.IDRequestChunkRadius, packet.IDSetLocalPlayerAsInitialised)
 }
 
 // nextResourcePackDownload moves to the next resource pack to download and sends a resource pack data info
