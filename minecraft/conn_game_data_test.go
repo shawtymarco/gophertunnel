@@ -44,7 +44,7 @@ func gameDataFixture(id uint64) GameData {
 		Items:        []protocol.ItemEntry{{Name: "minecraft:shield", RuntimeID: 355, Data: map[string]any{"value": int32(1)}}},
 		Experiments:  []protocol.ExperimentData{{Name: "test", Enabled: true}},
 		PropertyData: map[string]any{"test": int32(2)},
-		Dimensions:   []protocol.DimensionDefinition{{Name: "minecraft:overworld", Range: [2]int32{320, -64}}},
+		Dimensions:   []protocol.DimensionDefinition{{Name: "minecraft:overworld", MinimumY: -64, HeightRange: 384}},
 	}
 }
 
@@ -143,7 +143,7 @@ func TestConnGameDataConcurrentDialerPackets(t *testing.T) {
 		}
 	}()
 	waitGameDataTasks(t, &group)
-	if got := conn.GameData(); len(got.Dimensions) != 1 || got.Dimensions[0].Range != [2]int32{320, -64} || len(got.Items) != 1 {
+	if got := conn.GameData(); len(got.Dimensions) != 1 || got.Dimensions[0].MinimumY != -64 || got.Dimensions[0].HeightRange != 384 || len(got.Items) != 1 {
 		t.Fatalf("StartGame replaced pre-start dimensions or item registry: %+v", got)
 	}
 }
