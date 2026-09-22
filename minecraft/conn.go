@@ -125,14 +125,13 @@ type Conn struct {
 	// be instead used for authentication.
 	verifier *oidc.IDTokenVerifier
 
-	// packets is a channel of byte slices containing serialised packets that are coming in from the other
-	// side of the connection.
-	packets chan *packetData
+	// packetReady wakes readers. All application packets share the ordered
+	// deferred queue, including packets received after login.
+	packetReady chan struct{}
 
 	deferredPacketMu sync.Mutex
-	// deferredPackets is a list of packets that were pushed back during the login sequence because they
-	// were not used by the connection yet. These packets are read the first when calling to Read or
-	// ReadPacket after being connected.
+	// deferredPackets is the FIFO for all application packets, including those
+	// not consumed internally during login or spawn.
 	deferredPackets []*packetData
 	readDeadline    <-chan time.Time
 
@@ -214,7 +213,7 @@ func newConn(netConn net.Conn, key *ecdsa.PrivateKey, log *slog.Logger, proto Pr
 		enc:          packet.NewEncoder(netConn),
 		dec:          packet.NewDecoder(netConn),
 		salt:         make([]byte, 16),
-		packets:      make(chan *packetData, 8),
+		packetReady:  make(chan struct{}, 1),
 		additional:   make(chan packet.Packet, 16),
 		spawn:        make(chan struct{}),
 		conn:         netConn,
@@ -435,34 +434,18 @@ func (conn *Conn) ReadPacket() (pk packet.Packet, err error) {
 	if len(conn.additional) > 0 {
 		return <-conn.additional, nil
 	}
-	if data, ok := conn.takeDeferredPacket(); ok {
+	for {
+		data, err := conn.readPacketData("read packet")
+		if err != nil {
+			return nil, err
+		}
 		pk, err := data.decode(conn)
 		if err != nil {
 			conn.log.Error("read packet: " + err.Error())
-			return conn.ReadPacket()
+			continue
 		}
 		if len(pk) == 0 {
-			return conn.ReadPacket()
-		}
-		for _, additional := range pk[1:] {
-			conn.additional <- additional
-		}
-		return pk[0], nil
-	}
-
-	select {
-	case <-conn.ctx.Done():
-		return nil, conn.closeErr("read packet")
-	case <-conn.readDeadline:
-		return nil, conn.wrap(context.DeadlineExceeded, "read packet")
-	case data := <-conn.packets:
-		pk, err := data.decode(conn)
-		if err != nil {
-			conn.log.Error("read packet: " + err.Error())
-			return conn.ReadPacket()
-		}
-		if len(pk) == 0 {
-			return conn.ReadPacket()
+			continue
 		}
 		for _, additional := range pk[1:] {
 			conn.additional <- additional
@@ -491,40 +474,25 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 // ReadBytes reads a packet from the connection without decoding it directly.
 // For direct reading, consider using ReadPacket() which decodes the packet.
 func (conn *Conn) ReadBytes() ([]byte, error) {
-	if data, ok := conn.takeDeferredPacket(); ok {
-		return data.full, nil
+	data, err := conn.readPacketData("read")
+	if err != nil {
+		return nil, err
 	}
-	select {
-	case <-conn.ctx.Done():
-		return nil, conn.closeErr("read")
-	case <-conn.readDeadline:
-		return nil, conn.wrap(context.DeadlineExceeded, "read")
-	case data := <-conn.packets:
-		return data.full, nil
-	}
+	return data.full, nil
 }
 
 // Read reads a packet from the connection into the byte slice passed, provided the byte slice is big enough
 // to carry the full packet.
 // It is recommended to use ReadPacket() and ReadBytes() rather than Read() in cases where reading is done directly.
 func (conn *Conn) Read(b []byte) (n int, err error) {
-	if data, ok := conn.takeDeferredPacket(); ok {
-		if len(b) < len(data.full) {
-			return 0, conn.wrap(errBufferTooSmall, "read")
-		}
-		return copy(b, data.full), nil
+	data, err := conn.readPacketData("read")
+	if err != nil {
+		return 0, err
 	}
-	select {
-	case <-conn.ctx.Done():
-		return 0, conn.closeErr("read")
-	case <-conn.readDeadline:
-		return 0, conn.wrap(context.DeadlineExceeded, "read")
-	case data := <-conn.packets:
-		if len(b) < len(data.full) {
-			return 0, conn.wrap(errBufferTooSmall, "read")
-		}
-		return copy(b, data.full), nil
+	if len(b) < len(data.full) {
+		return 0, conn.wrap(errBufferTooSmall, "read")
 	}
+	return copy(b, data.full), nil
 }
 
 // Flush flushes the packets currently buffered by the connections to the underlying net.Conn, so that they
@@ -658,7 +626,11 @@ func (conn *Conn) takeDeferredPacket() (*packetData, bool) {
 	// will not be garbage collectable, because the array it's in is still referenced by the slice. Doing this
 	// makes sure garbage collecting the packet is possible.
 	conn.deferredPackets[0] = nil
-	conn.deferredPackets = conn.deferredPackets[1:]
+	if len(conn.deferredPackets) == 1 {
+		conn.deferredPackets = conn.deferredPackets[:0]
+	} else {
+		conn.deferredPackets = conn.deferredPackets[1:]
+	}
 	return data, true
 }
 
@@ -667,6 +639,25 @@ func (conn *Conn) deferPacket(pk *packetData) {
 	conn.deferredPacketMu.Lock()
 	conn.deferredPackets = append(conn.deferredPackets, pk)
 	conn.deferredPacketMu.Unlock()
+	select {
+	case conn.packetReady <- struct{}{}:
+	default:
+	}
+}
+
+func (conn *Conn) readPacketData(operation string) (*packetData, error) {
+	for {
+		if data, ok := conn.takeDeferredPacket(); ok {
+			return data, nil
+		}
+		select {
+		case <-conn.ctx.Done():
+			return nil, conn.closeErr(operation)
+		case <-conn.readDeadline:
+			return nil, conn.wrap(context.DeadlineExceeded, operation)
+		case <-conn.packetReady:
+		}
+	}
 }
 
 // receive receives an incoming serialised packet from the underlying connection. If the connection is not yet
@@ -686,18 +677,7 @@ func (conn *Conn) receive(data []byte) error {
 		return nil
 	}
 	if conn.loggedIn && !conn.waitingForSpawn.Load() {
-		select {
-		case <-conn.ctx.Done():
-		case previous := <-conn.packets:
-			// There was already a packet in this channel, so take it out and defer it so that it is read
-			// next.
-			conn.deferPacket(previous)
-		default:
-		}
-		select {
-		case <-conn.ctx.Done():
-		case conn.packets <- pkData:
-		}
+		conn.deferPacket(pkData)
 		return nil
 	}
 	return conn.handle(pkData)
