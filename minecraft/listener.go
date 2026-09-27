@@ -29,6 +29,15 @@ import (
 
 // ListenConfig holds settings that may be edited to change behaviour of a Listener.
 type ListenConfig struct {
+	// BootstrapMode optionally delegates post-authentication negotiation to the caller.
+	BootstrapMode BootstrapMode
+	// ProtocolFactory creates a connection-local copy of a selected protocol.
+	// Returning an error or a protocol with a different ID rejects the connection.
+	ProtocolFactory func(Protocol) (Protocol, error)
+	// AdvertisedProtocol and AdvertisedVersion override the server-list identity.
+	// Zero/empty retain the native identity; they do not change accepted protocols.
+	AdvertisedProtocol int32
+	AdvertisedVersion  string
 	// ErrorLog is a log.Logger that errors that occur during packet handling of
 	// clients are written to. By default, errors are not logged.
 	ErrorLog *slog.Logger
@@ -173,6 +182,9 @@ func (cfg ListenConfig) Listen(network string, address string) (*Listener, error
 // unspecified IP address, ListenNetwork listens on all available unicast and anycast IP addresses of
 // the local system.
 func (cfg ListenConfig) ListenNetwork(network Network, address string) (*Listener, error) {
+	if err := cfg.BootstrapMode.validate(); err != nil {
+		return nil, err
+	}
 	if cfg.ErrorLog == nil {
 		cfg.ErrorLog = slog.New(internal.DiscardHandler{})
 	}
@@ -391,8 +403,15 @@ func (listener *Listener) updatePongData() {
 	}); ok {
 		port = a.AddrPort().Port()
 	}
+	advertisedID, advertisedVersion := listener.cfg.AdvertisedProtocol, listener.cfg.AdvertisedVersion
+	if advertisedID == 0 {
+		advertisedID = protocol.CurrentProtocol
+	}
+	if advertisedVersion == "" {
+		advertisedVersion = protocol.CurrentVersion
+	}
 	listener.listener.PongData([]byte(fmt.Sprintf("MCPE;%v;%v;%v;%v;%v;%v;%v;%v;%v;%v;%v;%v;%v;",
-		s.ServerName, protocol.CurrentProtocol, protocol.CurrentVersion, s.PlayerCount, s.MaxPlayers,
+		s.ServerName, advertisedID, advertisedVersion, s.PlayerCount, s.MaxPlayers,
 		listener.listener.ID(), s.ServerSubName, "Creative", 1, port, port, 0, 0,
 	)))
 }
@@ -437,6 +456,8 @@ func (listener *Listener) createConn(netConn net.Conn) {
 	listener.packsMu.RUnlock()
 
 	conn := newConn(netConn, listener.key, listener.cfg.ErrorLog, proto{}, listener.cfg.FlushRate, true)
+	conn.bootstrapMode = listener.cfg.BootstrapMode
+	conn.protocolFactory = listener.cfg.ProtocolFactory
 	conn.disableEncryption = conn.disableEncryption || listener.cfg.DisablePacketEncryption
 	conn.acceptedProto = append(listener.cfg.AcceptedProtocols, proto{})
 	conn.compression = listener.cfg.Compression

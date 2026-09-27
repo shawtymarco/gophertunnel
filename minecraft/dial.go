@@ -40,6 +40,8 @@ import (
 // Dialer allows specifying specific settings for connection to a Minecraft server.
 // The zero value of Dialer is used for the package level Dial function.
 type Dialer struct {
+	// BootstrapMode optionally returns after login, before packs and spawn.
+	BootstrapMode BootstrapMode
 	// ErrorLog is a log.Logger that errors that occur during packet handling of
 	// servers are written to. By default, errors are not logged.
 	ErrorLog *slog.Logger
@@ -186,6 +188,9 @@ func (d Dialer) DialTimeout(network, address string, timeout time.Duration) (*Co
 // and send packets to. If a connection is not established before the context passed is cancelled,
 // DialContextNetwork returns an error.
 func (d Dialer) DialContextNetwork(ctx context.Context, network Network, address string) (conn *Conn, err error) {
+	if err := d.BootstrapMode.validate(); err != nil {
+		return nil, err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -290,6 +295,7 @@ func (d Dialer) DialContextNetwork(ctx context.Context, network Network, address
 	}
 
 	conn = newConn(netConn, key, d.ErrorLog, d.Protocol, d.FlushRate, false)
+	conn.bootstrapMode = d.BootstrapMode
 	conn.pool = conn.proto.Packets(false)
 	conn.identityData = d.IdentityData
 	conn.clientData = d.ClientData
@@ -300,6 +306,9 @@ func (d Dialer) DialContextNetwork(ctx context.Context, network Network, address
 	conn.disconnectOnInvalidPacket = d.DisconnectOnInvalidPackets
 	conn.disconnectOnUnknownPacket = d.DisconnectOnUnknownPackets
 	conn.maxDecompressedLen = math.MaxInt
+	if d.BootstrapMode == BootstrapModeManual {
+		conn.maxDecompressedLen = 32 << 20
+	}
 
 	defaultIdentityData(&conn.identityData)
 	defaultClientData(address, conn.identityData.DisplayName, &conn.clientData)

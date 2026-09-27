@@ -89,6 +89,8 @@ type Conn struct {
 	authEnabled bool
 
 	proto                 Protocol
+	bootstrapMode         BootstrapMode
+	protocolFactory       func(Protocol) (Protocol, error)
 	acceptedProto         []Protocol
 	pool                  packet.Pool
 	enc                   *packet.Encoder
@@ -133,6 +135,7 @@ type Conn struct {
 	// deferredPackets is the FIFO for all application packets, including those
 	// not consumed internally during login or spawn.
 	deferredPackets []*packetData
+	deferredBytes   int
 	readDeadline    <-chan time.Time
 
 	// sendMu protects bufferedSend/bufferedSendSpare.
@@ -201,7 +204,7 @@ type Conn struct {
 
 	shieldID atomic.Int32
 
-	additional chan packet.Packet
+	additional []packet.Packet
 }
 
 // newConn creates a new Minecraft connection for the net.Conn passed, reading and writing compressed
@@ -214,7 +217,6 @@ func newConn(netConn net.Conn, key *ecdsa.PrivateKey, log *slog.Logger, proto Pr
 		dec:          packet.NewDecoder(netConn),
 		salt:         make([]byte, 16),
 		packetReady:  make(chan struct{}, 1),
-		additional:   make(chan packet.Packet, 16),
 		spawn:        make(chan struct{}),
 		conn:         netConn,
 		privateKey:   key,
@@ -321,6 +323,9 @@ func (conn *Conn) StartGameTimeout(data GameData, timeout time.Duration) error {
 // minecraft.Dial(), use Conn.DoSpawn().
 // Slices/maps and their nested contents in data must not be modified after being supplied.
 func (conn *Conn) StartGameContext(ctx context.Context, data GameData) error {
+	if conn.bootstrapMode == BootstrapModeManual {
+		return fmt.Errorf("StartGame is unavailable in manual bootstrap mode; write the original packets")
+	}
 	if conn.gameDataReceived.Load() {
 		panic("(*Conn).StartGame must only be called on Listener connections")
 	}
@@ -379,6 +384,9 @@ func (conn *Conn) DoSpawnTimeout(timeout time.Duration) error {
 // DoSpawnContext will start the spawning sequence using the game data found in conn.GameData(), which was
 // sent earlier by the server.
 func (conn *Conn) DoSpawnContext(ctx context.Context) error {
+	if conn.bootstrapMode == BootstrapModeManual {
+		return fmt.Errorf("DoSpawn is unavailable in manual bootstrap mode; relay spawn packets")
+	}
 	select {
 	case <-conn.ctx.Done():
 		return conn.closeErr("do spawn")
@@ -400,6 +408,7 @@ func (conn *Conn) WritePacket(pk packet.Packet) error {
 	}
 	conn.sendMu.Lock()
 	defer conn.sendMu.Unlock()
+	conn.observeManualPacket(pk)
 
 	buf := internal.BufferPool.Get().(*bytes.Buffer)
 	defer func() {
@@ -431,8 +440,16 @@ func (conn *Conn) WritePacket(pk packet.Packet) error {
 // If the packet read was not implemented, a *packet.Unknown is returned, containing the raw payload of the
 // packet read.
 func (conn *Conn) ReadPacket() (pk packet.Packet, err error) {
+	defer func() {
+		if err == nil && pk != nil {
+			conn.observeManualPacket(pk)
+		}
+	}()
 	if len(conn.additional) > 0 {
-		return <-conn.additional, nil
+		pk = conn.additional[0]
+		conn.additional[0] = nil
+		conn.additional = conn.additional[1:]
+		return pk, nil
 	}
 	for {
 		data, err := conn.readPacketData("read packet")
@@ -447,9 +464,7 @@ func (conn *Conn) ReadPacket() (pk packet.Packet, err error) {
 		if len(pk) == 0 {
 			continue
 		}
-		for _, additional := range pk[1:] {
-			conn.additional <- additional
-		}
+		conn.additional = append(conn.additional, pk[1:]...)
 		return pk[0], nil
 	}
 }
@@ -622,6 +637,7 @@ func (conn *Conn) takeDeferredPacket() (*packetData, bool) {
 		return nil, false
 	}
 	data := conn.deferredPackets[0]
+	conn.deferredBytes -= len(data.full)
 	// Explicitly clear out the packet at offset 0. When we slice it to remove the first element, that element
 	// will not be garbage collectable, because the array it's in is still referenced by the slice. Doing this
 	// makes sure garbage collecting the packet is possible.
@@ -637,7 +653,13 @@ func (conn *Conn) takeDeferredPacket() (*packetData, bool) {
 // deferPacket defers a packet so that it is obtained in the next ReadPacket call
 func (conn *Conn) deferPacket(pk *packetData) {
 	conn.deferredPacketMu.Lock()
+	if conn.bootstrapMode == BootstrapModeManual && (len(conn.deferredPackets) >= 4096 || conn.deferredBytes+len(pk.full) > 32<<20) {
+		conn.deferredPacketMu.Unlock()
+		_ = conn.close(fmt.Errorf("manual bootstrap receive queue limit exceeded"))
+		return
+	}
 	conn.deferredPackets = append(conn.deferredPackets, pk)
+	conn.deferredBytes += len(pk.full)
 	conn.deferredPacketMu.Unlock()
 	select {
 	case conn.packetReady <- struct{}{}:
@@ -667,7 +689,7 @@ func (conn *Conn) receive(data []byte) error {
 	if err != nil {
 		return err
 	}
-	if pkData.h.PacketID == packet.IDDisconnect {
+	if pkData.h.PacketID == packet.IDDisconnect && !(conn.bootstrapMode == BootstrapModeManual && conn.loggedIn) {
 		// We always handle disconnect packets and close the connection if one comes in.
 		pks, err := pkData.decode(conn)
 		if err != nil {
@@ -872,6 +894,13 @@ func (conn *Conn) handleLogin(pk *packet.Login) error {
 func (conn *Conn) selectProtocol(protocolID int32) bool {
 	for _, candidate := range conn.acceptedProto {
 		if candidate.ID() == protocolID {
+			if conn.protocolFactory != nil {
+				selected, err := conn.protocolFactory(candidate)
+				if err != nil || selected == nil || selected.ID() != protocolID {
+					return false
+				}
+				candidate = selected
+			}
 			conn.proto = candidate
 			conn.pool = candidate.Packets(true)
 			return true
@@ -893,6 +922,11 @@ type publicKeyConn interface {
 
 // handleClientToServerHandshake handles an incoming ClientToServerHandshake packet.
 func (conn *Conn) handleClientToServerHandshake() error {
+	if conn.bootstrapMode == BootstrapModeManual {
+		conn.loggedIn = true
+		conn.expect()
+		return nil
+	}
 	// The next expected packet is a resource pack client response.
 	conn.expect(packet.IDResourcePackClientResponse, packet.IDClientCacheStatus)
 	if err := conn.WritePacket(&packet.PlayStatus{Status: packet.PlayStatusLoginSuccess}); err != nil {
@@ -1525,6 +1559,17 @@ func (conn *Conn) handleSetLocalPlayerAsInitialised(pk *packet.SetLocalPlayerAsI
 func (conn *Conn) handlePlayStatus(pk *packet.PlayStatus) error {
 	switch pk.Status {
 	case packet.PlayStatusLoginSuccess:
+		if conn.bootstrapMode == BootstrapModeManual {
+			conn.loggedIn = true
+			conn.expect()
+			var b bytes.Buffer
+			header := &packet.Header{PacketID: pk.ID()}
+			_ = header.Write(&b)
+			offset := b.Len()
+			pk.Marshal(protocol.NewWriter(&b, 0))
+			conn.deferPacket(&packetData{h: header, full: b.Bytes(), payload: bytes.NewBuffer(b.Bytes()[offset:])})
+			return nil
+		}
 		if err := conn.WritePacket(&packet.ClientCacheStatus{Enabled: conn.cacheEnabled}); err != nil {
 			return fmt.Errorf("send ClientCacheStatus: %w", err)
 		}
