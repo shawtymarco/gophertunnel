@@ -351,7 +351,10 @@ func (d Dialer) DialContextNetwork(ctx context.Context, network Network, address
 	ctx, cancel := context.WithCancelCause(ctx)
 	go listenConn(conn, readyForLogin, connected, cancel)
 	if loginFirst {
-		conn.expect(packet.IDServerToClientHandshake, packet.IDPlayStatus)
+		// Login-first peers enter the same resource-pack phase as modern peers.
+		// LoginSuccess no longer replaces expected IDs, so publish all responses
+		// before the legacy Login reaches the server too.
+		conn.expect(packet.IDServerToClientHandshake, packet.IDPlayStatus, packet.IDResourcePacksInfo)
 		if err := conn.WritePacket(&packet.Login{ConnectionRequest: request, ClientProtocol: d.Protocol.ID()}); err != nil {
 			return nil, conn.wrap(fmt.Errorf("send legacy login: %w", err), "dial")
 		}
