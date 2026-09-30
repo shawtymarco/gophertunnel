@@ -92,3 +92,30 @@ func TestEmptyReceiveQueueHonoursDeadlineAndClose(t *testing.T) {
 		t.Fatal("closed read succeeded")
 	}
 }
+
+func TestDeferredApplicationPacketOwnsBorrowedBatch(t *testing.T) {
+	conn := gameDataTestConn(DefaultProtocol)
+	defer conn.Close()
+	conn.pool = DefaultProtocol.Packets(false)
+	conn.loggedIn = true
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	var buffer bytes.Buffer
+	pk := &packet.Text{TextType: packet.TextTypeRaw, Message: "retained after DecodeFunc"}
+	if err := (&packet.Header{PacketID: pk.ID()}).Write(&buffer); err != nil {
+		t.Fatal(err)
+	}
+	pk.Marshal(protocol.NewWriter(&buffer, 0))
+	if err := conn.receive(buffer.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	// DecodeFunc returns its pooled storage immediately after the callback.
+	// Poison it before the application reads from the fork's FIFO queue.
+	clear(buffer.Bytes())
+	got, err := conn.ReadPacket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.(*packet.Text).Message != pk.Message {
+		t.Fatalf("deferred packet retained borrowed memory: %q", got.(*packet.Text).Message)
+	}
+}

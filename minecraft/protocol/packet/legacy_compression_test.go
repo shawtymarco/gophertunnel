@@ -48,3 +48,53 @@ func TestModernCompressionStillUsesAlgorithmPrefix(t *testing.T) {
 		t.Fatalf("modern frame has no algorithm prefix: %x", got)
 	}
 }
+
+func TestPooledDecodeRetainsLegacyFramingAndLimits(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		legacy  bool
+		limit   int
+		wantErr bool
+	}{
+		{"modern_default", false, 0, false},
+		{"modern_unlimited", false, -1, false},
+		{"modern_bounded", false, 4, true},
+		{"legacy_default", true, 0, false},
+		{"legacy_unlimited", true, -1, false},
+		{"legacy_bounded", true, 4, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			want := [][]byte{{1, 2, 3, 4}, {5, 6, 7, 8}}
+			var network bytes.Buffer
+			encoder := NewEncoder(&network)
+			if test.legacy {
+				encoder.EnableLegacyCompression(FlateCompression)
+			} else {
+				encoder.EnableCompression(FlateCompression, 0)
+			}
+			if err := encoder.Encode(want); err != nil {
+				t.Fatal(err)
+			}
+			decoder := NewDecoder(bytes.NewReader(network.Bytes()))
+			if test.legacy {
+				decoder.EnableLegacyCompression(FlateCompression, test.limit)
+			} else {
+				decoder.EnableCompression(FlateCompression, test.limit)
+			}
+			var got [][]byte
+			err := decoder.DecodeFunc(func(data []byte) error {
+				got = append(got, bytes.Clone(data))
+				return nil
+			})
+			if test.wantErr {
+				if err == nil || len(got) != 0 {
+					t.Fatalf("oversized batch dispatched packets: err=%v packets=%v", err, got)
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Fatalf("pooled batch: err=%v packets=%v, want %v", err, got, want)
+			}
+		})
+	}
+}
