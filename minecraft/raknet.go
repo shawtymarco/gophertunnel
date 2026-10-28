@@ -46,31 +46,40 @@ func (r RakNetV10) WithMaximumMTU(maximumMTU uint16) Network {
 }
 
 func (r RakNet) DialContext(ctx context.Context, address string) (net.Conn, error) {
-	return raknet.Dialer{ErrorLog: r.l.With("net origin", "raknet"), MaxMTU: r.maximumMTU}.DialContext(ctx, address)
+	return raknet.Dialer{ErrorLog: rakNetLogger(r.l, "raknet"), MaxMTU: r.maximumMTU}.DialContext(ctx, address)
 }
 
 func (r RakNet) PingContext(ctx context.Context, address string) ([]byte, error) {
-	return raknet.Dialer{ErrorLog: r.l.With("net origin", "raknet")}.PingContext(ctx, address)
+	return raknet.Dialer{ErrorLog: rakNetLogger(r.l, "raknet")}.PingContext(ctx, address)
 }
 
 func (r RakNet) Listen(address string) (NetworkListener, error) {
-	return listenMultiVersionRakNet(address, r.l.With("net origin", "raknet"), r.maximumMTU)
+	return listenMultiVersionRakNet(address, rakNetLogger(r.l, "raknet"), r.maximumMTU)
 }
 
 func (r RakNetV10) DialContext(ctx context.Context, address string) (net.Conn, error) {
 	return raknet.Dialer{
-		ErrorLog:       r.l.With("net origin", "raknet-v10"),
-		UpstreamDialer: rakNetV10UpstreamDialer{logger: r.l.With("net origin", "raknet-v10")},
+		ErrorLog:       rakNetLogger(r.l, "raknet-v10"),
+		UpstreamDialer: rakNetV10UpstreamDialer{logger: rakNetLogger(r.l, "raknet-v10")},
 		MaxMTU:         r.maximumMTU,
 	}.DialContext(ctx, address)
 }
 
 func (r RakNetV10) PingContext(ctx context.Context, address string) ([]byte, error) {
-	return raknet.Dialer{ErrorLog: r.l.With("net origin", "raknet-v10")}.PingContext(ctx, address)
+	return raknet.Dialer{ErrorLog: rakNetLogger(r.l, "raknet-v10")}.PingContext(ctx, address)
 }
 
 func (r RakNetV10) Listen(address string) (NetworkListener, error) {
-	return listenMultiVersionRakNet(address, r.l.With("net origin", "raknet-v10"), r.maximumMTU)
+	return listenMultiVersionRakNet(address, rakNetLogger(r.l, "raknet-v10"), r.maximumMTU)
+}
+
+// RakNet and RakNetV10 may be supplied directly to ListenNetwork/DialContextNetwork,
+// without going through the registry that normally supplies their logger.
+func rakNetLogger(logger *slog.Logger, origin string) *slog.Logger {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return logger.With("net origin", origin)
 }
 
 func listenMultiVersionRakNet(address string, logger *slog.Logger, maximumMTU uint16) (NetworkListener, error) {

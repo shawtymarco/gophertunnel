@@ -153,8 +153,15 @@ type Listener struct {
 
 	group *ListenerGroup
 
-	incoming chan *Conn
-	close    chan struct{}
+	incoming      chan *Conn
+	close         chan struct{}
+	acceptDone    chan struct{}
+	pongDone      chan struct{}
+	stopOnce      sync.Once
+	stopErr       error
+	connectionsMu sync.Mutex
+	connections   map[*Conn]struct{}
+	connectionsWG sync.WaitGroup
 
 	key *ecdsa.PrivateKey
 	// verifier is used to verify the OpenID token issued by the authorization service
@@ -262,17 +269,21 @@ func (cfg ListenConfig) ListenNetwork(network Network, address string) (*Listene
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	if err != nil {
+		_ = netListener.Close()
 		return nil, fmt.Errorf("generating ECDSA key: %w", err)
 	}
 	listener := &Listener{
-		cfg:      cfg,
-		listener: netListener,
-		group:    cfg.ListenerGroup,
-		packs:    slices.Clone(cfg.ResourcePacks),
-		incoming: make(chan *Conn),
-		close:    make(chan struct{}),
-		key:      key,
-		verifier: verifier,
+		cfg:         cfg,
+		listener:    netListener,
+		group:       cfg.ListenerGroup,
+		packs:       slices.Clone(cfg.ResourcePacks),
+		incoming:    make(chan *Conn),
+		close:       make(chan struct{}),
+		acceptDone:  make(chan struct{}),
+		pongDone:    make(chan struct{}),
+		connections: make(map[*Conn]struct{}),
+		key:         key,
+		verifier:    verifier,
 	}
 
 	// Actually start listening.
@@ -365,11 +376,12 @@ func oidcVerifier(ctx context.Context) (*oidc.IDTokenVerifier, error) {
 // use the Conn.ReadPacket() and Conn.WritePacket() methods.
 // Accept returns an error if the listener is closed.
 func (listener *Listener) Accept() (net.Conn, error) {
-	conn, ok := <-listener.incoming
-	if !ok {
+	select {
+	case <-listener.close:
 		return nil, &net.OpError{Op: "accept", Net: "minecraft", Addr: listener.Addr(), Err: net.ErrClosed}
+	case conn := <-listener.incoming:
+		return conn, nil
 	}
-	return conn, nil
 }
 
 // Disconnect disconnects a Minecraft Conn passed by first sending a disconnect with the message passed, and
@@ -408,7 +420,24 @@ func (listener *Listener) Addr() net.Addr {
 
 // Close closes the listener and the underlying net.Listener. Pending calls to Accept will fail immediately.
 func (listener *Listener) Close() error {
-	return listener.listener.Close()
+	listener.stop()
+	<-listener.acceptDone
+	listener.connectionsMu.Lock()
+	connections := make([]*Conn, 0, len(listener.connections))
+	for conn := range listener.connections {
+		connections = append(connections, conn)
+	}
+	listener.connectionsMu.Unlock()
+	for _, conn := range connections {
+		conn.closeTransport(errListenerClosed)
+	}
+	listener.connectionsWG.Wait()
+	<-listener.pongDone
+	return listener.stopErr
+}
+
+func (listener *Listener) stop() {
+	listener.stopOnce.Do(func() { close(listener.close); listener.stopErr = listener.listener.Close() })
 }
 
 // PlayerCount returns the number of active connections.
@@ -441,6 +470,7 @@ func (listener *Listener) updatePongData() {
 func (listener *Listener) listen() {
 	listener.updatePongData()
 	go func() {
+		defer close(listener.pongDone)
 		ticker := time.NewTicker(time.Second * 4)
 		defer ticker.Stop()
 		for {
@@ -453,9 +483,9 @@ func (listener *Listener) listen() {
 		}
 	}()
 	defer func() {
-		close(listener.close)
-		close(listener.incoming)
-		_ = listener.Close()
+		close(listener.acceptDone)
+		// Let Close join connection readers without waiting on this accept loop.
+		go listener.Close()
 	}()
 	for {
 		netConn, err := listener.listener.Accept()
@@ -526,11 +556,19 @@ func (listener *Listener) createConn(netConn net.Conn) {
 			}
 		})
 	}
+	listener.connectionsMu.Lock()
+	listener.connections[conn] = struct{}{}
+	listener.connectionsMu.Unlock()
+	listener.connectionsWG.Add(1)
 	go func() {
+		defer listener.connectionsWG.Done()
 		listener.handleConn(conn)
 		if timer != nil {
 			timer.Stop()
 		}
+		listener.connectionsMu.Lock()
+		delete(listener.connections, conn)
+		listener.connectionsMu.Unlock()
 	}()
 }
 
